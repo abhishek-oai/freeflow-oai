@@ -46,3 +46,19 @@ Some day!
 ## License
 
 Licensed under the MIT license.
+
+## Building a DMG
+
+To build an unsigned DMG for internal use:
+
+```bash
+make dmg CODESIGN_IDENTITY=-
+```
+
+That creates `build/FreeFlow Dev.dmg`.
+
+If you want the packaging step by itself, run:
+
+```bash
+scripts/create_dmg.sh
+```
