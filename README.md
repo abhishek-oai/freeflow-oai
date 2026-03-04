@@ -26,20 +26,20 @@ So over the weekend I vibe-coded my own free version!
 It's called FreeFlow. Here's how it works:
 
 1. Download the app from above or [click here](https://github.com/zachlatta/freeflow/releases/latest/download/FreeFlow.dmg)
-2. Get a free Groq API key from [groq.com](https://groq.com/)
+2. Create an OpenAI API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 3. Press and hold `Fn` anytime to start recording and have whatever you say pasted into the current text field
 
-One of the cool features is that it's context aware. If you're replying to an email, it'll read the names of the people you're replying to and make sure to spell their names correctly. Same with if you're dictating into a terminal or another app. This is the same thing as Monologue's "Deep Context" feature.
+This build uses OpenAI's audio transcription endpoint with `gpt-4o-mini-transcribe` for direct voice-to-text transcription.
 
-An added bonus is that there's no FreeFlow server, so no data is stored or retained - making it more privacy friendly than the SaaS apps. The only information that leaves your computer are the API calls to Groq's transcription and LLM API (LLM is for post-processing the transcription to adapt to context).
+An added bonus is that there's no FreeFlow server, so no data is stored or retained - making it more privacy friendly than the SaaS apps. The only information that leaves your computer are the API calls to OpenAI for transcription.
 
 ### FAQ
 
-**Why does this use Groq instead of a local transcription model?**
+**Why does this use OpenAI instead of a local transcription model?**
 
-I love this idea, and originally planned to build FreeFlow using local models, but to have post-processing (that's where you get correctly spelled names when replying to emails / etc), you need to have a local LLM too.
+I love this idea, and originally planned to build FreeFlow using local models.
 
-If you do that, the total pipeline takes too long for the UX to be good (5-10 seconds per transcription instead of <1s). I also had concerns around battery life.
+In practice, the UX is much better when transcription completes quickly after you release the push-to-talk key. Hosted speech models currently make that experience feel more reliable and more responsive on a wide range of Macs.
 
 Some day!
 

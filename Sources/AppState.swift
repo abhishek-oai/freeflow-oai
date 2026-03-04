@@ -5,14 +5,12 @@ import AVFoundation
 import CoreAudio
 import ServiceManagement
 import ApplicationServices
-import ScreenCaptureKit
 import os.log
 
 private let recordingLog = OSLog(subsystem: "com.zachlatta.freeflow", category: "Recording")
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general
-    case prompts
     case runLog
 
     var id: String { rawValue }
@@ -20,7 +18,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: return "General"
-        case .prompts: return "Prompts"
         case .runLog: return "Run Log"
         }
     }
@@ -28,21 +25,15 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .general: return "gearshape"
-        case .prompts: return "text.bubble"
         case .runLog: return "clock.arrow.circlepath"
         }
     }
 }
 
 final class AppState: ObservableObject, @unchecked Sendable {
-    private let apiKeyStorageKey = "groq_api_key"
+    private let apiKeyStorageKey = "openai_api_key"
     private let apiBaseURLStorageKey = "api_base_url"
-    private let customVocabularyStorageKey = "custom_vocabulary"
     private let selectedMicrophoneStorageKey = "selected_microphone_id"
-    private let customSystemPromptStorageKey = "custom_system_prompt"
-    private let customContextPromptStorageKey = "custom_context_prompt"
-    private let customSystemPromptLastModifiedStorageKey = "custom_system_prompt_last_modified"
-    private let customContextPromptLastModifiedStorageKey = "custom_context_prompt_last_modified"
     private let transcribingIndicatorDelay: TimeInterval = 1.0
     let maxPipelineHistoryCount = 20
 
@@ -55,14 +46,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var apiKey: String {
         didSet {
             persistAPIKey(apiKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
         }
     }
 
     @Published var apiBaseURL: String {
         didSet {
             persistAPIBaseURL(apiBaseURL)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
         }
     }
 
@@ -73,55 +62,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published var customVocabulary: String {
-        didSet {
-            UserDefaults.standard.set(customVocabulary, forKey: customVocabularyStorageKey)
-        }
-    }
-
-    @Published var customSystemPrompt: String {
-        didSet {
-            UserDefaults.standard.set(customSystemPrompt, forKey: customSystemPromptStorageKey)
-        }
-    }
-
-    @Published var customContextPrompt: String {
-        didSet {
-            UserDefaults.standard.set(customContextPrompt, forKey: customContextPromptStorageKey)
-            contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
-        }
-    }
-
-    @Published var customSystemPromptLastModified: String {
-        didSet {
-            UserDefaults.standard.set(customSystemPromptLastModified, forKey: customSystemPromptLastModifiedStorageKey)
-        }
-    }
-
-    @Published var customContextPromptLastModified: String {
-        didSet {
-            UserDefaults.standard.set(customContextPromptLastModified, forKey: customContextPromptLastModifiedStorageKey)
-        }
-    }
-
     @Published var isRecording = false
     @Published var isTranscribing = false
-    @Published var lastTranscript: String = ""
+    @Published var lastTranscript = ""
+    @Published var lastRawTranscript = ""
     @Published var errorMessage: String?
-    @Published var statusText: String = "Ready"
+    @Published var statusText = "Ready"
     @Published var hasAccessibility = false
     @Published var isDebugOverlayActive = false
     @Published var selectedSettingsTab: SettingsTab? = .general
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published var debugStatusMessage = "Idle"
-    @Published var lastRawTranscript = ""
-    @Published var lastPostProcessedTranscript = ""
-    @Published var lastPostProcessingPrompt = ""
-    @Published var lastContextSummary = ""
-    @Published var lastPostProcessingStatus = ""
-    @Published var lastContextScreenshotDataURL: String? = nil
-    @Published var lastContextScreenshotStatus = "No screenshot"
-    @Published var hasScreenRecordingPermission = false
     @Published var launchAtLogin: Bool {
         didSet { setLaunchAtLogin(launchAtLogin) }
     }
@@ -131,34 +82,28 @@ final class AppState: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.set(selectedMicrophoneID, forKey: selectedMicrophoneStorageKey)
         }
     }
+
     @Published var availableMicrophones: [AudioDevice] = []
 
     let audioRecorder = AudioRecorder()
     let hotkeyManager = HotkeyManager()
     let overlayManager = RecordingOverlayManager()
+
     private var accessibilityTimer: Timer?
     private var audioLevelCancellable: AnyCancellable?
     private var debugOverlayTimer: Timer?
     private var transcribingIndicatorTask: Task<Void, Never>?
-    private var contextService: AppContextService
-    private var contextCaptureTask: Task<AppContext?, Never>?
-    private var capturedContext: AppContext?
-    private var hasShownScreenshotPermissionAlert = false
     private var audioDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private let pipelineHistoryStore = PipelineHistoryStore()
 
     init() {
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
         let apiKey = Self.loadStoredAPIKey(account: apiKeyStorageKey)
-        let apiBaseURL = Self.loadStoredAPIBaseURL(account: "api_base_url")
-        let selectedHotkey = HotkeyOption(rawValue: UserDefaults.standard.string(forKey: "hotkey_option") ?? "fn") ?? .fnKey
-        let customVocabulary = UserDefaults.standard.string(forKey: customVocabularyStorageKey) ?? ""
-        let customSystemPrompt = UserDefaults.standard.string(forKey: customSystemPromptStorageKey) ?? ""
-        let customContextPrompt = UserDefaults.standard.string(forKey: customContextPromptStorageKey) ?? ""
-        let customSystemPromptLastModified = UserDefaults.standard.string(forKey: customSystemPromptLastModifiedStorageKey) ?? ""
-        let customContextPromptLastModified = UserDefaults.standard.string(forKey: customContextPromptLastModifiedStorageKey) ?? ""
+        let apiBaseURL = Self.loadStoredAPIBaseURL(account: apiBaseURLStorageKey)
+        let selectedHotkey = HotkeyOption(rawValue: UserDefaults.standard.string(forKey: "hotkey_option") ?? HotkeyOption.fnKey.rawValue) ?? .fnKey
         let initialAccessibility = AXIsProcessTrusted()
-        let initialScreenCapturePermission = CGPreflightScreenCaptureAccess()
+        let selectedMicrophoneID = UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? "default"
+
         var removedAudioFileNames: [String] = []
         do {
             removedAudioFileNames = try pipelineHistoryStore.trim(to: maxPipelineHistoryCount)
@@ -170,21 +115,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         let savedHistory = pipelineHistoryStore.loadAllHistory()
 
-        let selectedMicrophoneID = UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? "default"
-
-        self.contextService = AppContextService(apiKey: apiKey, baseURL: apiBaseURL, customContextPrompt: customContextPrompt)
         self.hasCompletedSetup = hasCompletedSetup
         self.apiKey = apiKey
         self.apiBaseURL = apiBaseURL
         self.selectedHotkey = selectedHotkey
-        self.customVocabulary = customVocabulary
-        self.customSystemPrompt = customSystemPrompt
-        self.customContextPrompt = customContextPrompt
-        self.customSystemPromptLastModified = customSystemPromptLastModified
-        self.customContextPromptLastModified = customContextPromptLastModified
-        self.pipelineHistory = savedHistory
         self.hasAccessibility = initialAccessibility
-        self.hasScreenRecordingPermission = initialScreenCapturePermission
+        self.pipelineHistory = savedHistory
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
         self.selectedMicrophoneID = selectedMicrophoneID
 
@@ -228,12 +164,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
+    private static let defaultAPIBaseURL = TranscriptionService.defaultBaseURL
 
     private static func loadStoredAPIBaseURL(account: String) -> String {
-        if let stored = AppSettingsStorage.load(account: account), !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return stored
-        }
+        // Ignore legacy stored provider URLs. This build is OpenAI-only and
+        // hidden base URL state from older installs can silently point at the
+        // wrong backend during setup validation.
+        AppSettingsStorage.delete(account: account)
         return defaultAPIBaseURL
     }
 
@@ -299,11 +236,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func startAccessibilityPolling() {
         accessibilityTimer?.invalidate()
         hasAccessibility = AXIsProcessTrusted()
-        hasScreenRecordingPermission = hasScreenCapturePermission()
         accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.hasAccessibility = AXIsProcessTrusted()
-                self?.hasScreenRecordingPermission = self?.hasScreenCapturePermission() ?? false
             }
         }
     }
@@ -318,30 +253,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         AXIsProcessTrustedWithOptions(options)
     }
 
-    func hasScreenCapturePermission() -> Bool {
-        CGPreflightScreenCaptureAccess()
-    }
-
-    func requestScreenCapturePermission() {
-        // ScreenCaptureKit triggers the "Screen & System Audio Recording"
-        // permission dialog on macOS Sequoia+, correctly identifying the
-        // running app (unlike the legacy CGWindowListCreateImage path).
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] _, _ in
-            DispatchQueue.main.async {
-                self?.hasScreenRecordingPermission = CGPreflightScreenCaptureAccess()
-            }
-        }
-
-        hasScreenRecordingPermission = CGPreflightScreenCaptureAccess()
-    }
-
-    func openScreenCaptureSettings() {
-        let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-        if let url = settingsURL {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     private func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
@@ -350,7 +261,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            // Revert the toggle on failure without re-triggering didSet
             let current = SMAppService.mainApp.status == .enabled
             if current != launchAtLogin {
                 launchAtLogin = current
@@ -472,12 +382,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func beginRecording() {
         os_log(.info, log: recordingLog, "beginRecording() entered")
         errorMessage = nil
+        lastRawTranscript = ""
 
         isRecording = true
         statusText = "Starting..."
-        hasShownScreenshotPermissionAlert = false
 
-        // Show initializing dots only if engine takes longer than 0.5s to start
         var overlayShown = false
         let initTimer = DispatchSource.makeTimerSource(queue: .main)
         initTimer.schedule(deadline: .now() + 0.5)
@@ -489,7 +398,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         initTimer.resume()
 
-        // Transition to waveform when first real audio arrives (any non-zero RMS)
         let deviceUID = selectedMicrophoneID
         audioRecorder.onRecordingReady = { [weak self] in
             DispatchQueue.main.async {
@@ -507,7 +415,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Start engine on background thread so UI isn't blocked
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
@@ -515,7 +422,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 try self.audioRecorder.startRecording(deviceUID: deviceUID)
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async {
-                    self.startContextCapture()
                     self.audioLevelCancellable = self.audioRecorder.$audioLevel
                         .receive(on: DispatchQueue.main)
                         .sink { [weak self] level in
@@ -562,11 +468,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         alert.icon = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)
 
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            if let url = settingsURL {
-                NSWorkspace.shared.open(url)
-            }
+        if response == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -589,17 +493,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioLevelCancellable?.cancel()
         audioLevelCancellable = nil
         debugStatusMessage = "Preparing audio"
-        let sessionContext = capturedContext
-        let inFlightContextTask = contextCaptureTask
-        capturedContext = nil
-        contextCaptureTask = nil
         lastRawTranscript = ""
-        lastPostProcessedTranscript = ""
-        lastContextSummary = ""
-        lastPostProcessingStatus = ""
-        lastPostProcessingPrompt = ""
-        lastContextScreenshotDataURL = nil
-        lastContextScreenshotStatus = "No screenshot"
 
         guard let fileURL = audioRecorder.stopRecording() else {
             audioRecorder.cleanup()
@@ -608,6 +502,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             statusText = "Error"
             return
         }
+
         let savedAudioFileName = Self.saveAudioFile(from: fileURL)
         isRecording = false
         isTranscribing = true
@@ -631,67 +526,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         let transcriptionService = TranscriptionService(apiKey: apiKey, baseURL: apiBaseURL)
-        let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
 
         Task {
             do {
-                async let transcript = transcriptionService.transcribe(fileURL: fileURL)
-                let rawTranscript = try await transcript
-                let appContext: AppContext
-                if let sessionContext {
-                    appContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
-                    appContext = inFlightContext
-                } else {
-                    appContext = fallbackContextAtStop()
-                }
-                await MainActor.run { [weak self] in
-                    self?.debugStatusMessage = "Running post-processing"
-                }
-                let finalTranscript: String
-                let processingStatus: String
-                let postProcessingPrompt: String
-                do {
-                    let postProcessingResult = try await postProcessingService.postProcess(
-                        transcript: rawTranscript,
-                        context: appContext,
-                        customVocabulary: customVocabulary,
-                        customSystemPrompt: customSystemPrompt
-                    )
-                    finalTranscript = postProcessingResult.transcript
-                    processingStatus = "Post-processing succeeded"
-                    postProcessingPrompt = postProcessingResult.prompt
-                } catch {
-                    finalTranscript = rawTranscript
-                    processingStatus = "Post-processing failed, using raw transcript"
-                    postProcessingPrompt = ""
-                }
+                let transcript = try await transcriptionService.transcribe(fileURL: fileURL)
                 await MainActor.run {
-                    self.lastContextSummary = appContext.contextSummary
-                    self.lastContextScreenshotDataURL = appContext.screenshotDataURL
-                    self.lastContextScreenshotStatus = appContext.screenshotError
-                        ?? "available (\(appContext.screenshotMimeType ?? "image"))"
-                    let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let trimmedFinalTranscript = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.lastPostProcessingPrompt = postProcessingPrompt
-                    self.lastRawTranscript = trimmedRawTranscript
-                    self.lastPostProcessedTranscript = trimmedFinalTranscript
-                    self.lastPostProcessingStatus = processingStatus
+                    let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastRawTranscript = trimmedTranscript
+                    self.lastTranscript = trimmedTranscript
                     self.recordPipelineHistoryEntry(
-                        rawTranscript: trimmedRawTranscript,
-                        postProcessedTranscript: trimmedFinalTranscript,
-                        postProcessingPrompt: postProcessingPrompt,
-                        context: appContext,
-                        processingStatus: processingStatus,
+                        transcript: trimmedTranscript,
+                        processingStatus: "Audio transcription succeeded",
                         audioFileName: savedAudioFileName
                     )
                     self.transcribingIndicatorTask?.cancel()
                     self.transcribingIndicatorTask = nil
-                    self.lastTranscript = trimmedFinalTranscript
                     self.isTranscribing = false
                     self.debugStatusMessage = "Done"
 
-                    if trimmedFinalTranscript.isEmpty {
+                    if trimmedTranscript.isEmpty {
                         self.statusText = "Nothing to transcribe"
                         self.overlayManager.dismiss()
                     } else {
@@ -702,7 +555,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         }
 
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(trimmedFinalTranscript, forType: .string)
+                        NSPasteboard.general.setString(trimmedTranscript, forType: .string)
 
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                             self.pasteAtCursor()
@@ -718,14 +571,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                 }
             } catch {
-                let resolvedContext: AppContext
-                if let sessionContext {
-                    resolvedContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
-                    resolvedContext = inFlightContext
-                } else {
-                    resolvedContext = fallbackContextAtStop()
-                }
                 await MainActor.run {
                     self.transcribingIndicatorTask?.cancel()
                     self.transcribingIndicatorTask = nil
@@ -734,19 +579,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.statusText = "Error"
                     self.audioRecorder.cleanup()
                     self.overlayManager.dismiss()
-                    self.lastPostProcessedTranscript = ""
                     self.lastRawTranscript = ""
-                    self.lastContextSummary = ""
-                    self.lastPostProcessingStatus = "Error: \(error.localizedDescription)"
-                    self.lastPostProcessingPrompt = ""
-                    self.lastContextScreenshotDataURL = resolvedContext.screenshotDataURL
-                    self.lastContextScreenshotStatus = resolvedContext.screenshotError
-                        ?? "available (\(resolvedContext.screenshotMimeType ?? "image"))"
+                    self.debugStatusMessage = "Error"
                     self.recordPipelineHistoryEntry(
-                        rawTranscript: "",
-                        postProcessedTranscript: "",
-                        postProcessingPrompt: "",
-                        context: resolvedContext,
+                        transcript: "",
                         processingStatus: "Error: \(error.localizedDescription)",
                         audioFileName: savedAudioFileName
                     )
@@ -756,28 +592,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func recordPipelineHistoryEntry(
-        rawTranscript: String,
-        postProcessedTranscript: String,
-        postProcessingPrompt: String,
-        context: AppContext,
+        transcript: String,
         processingStatus: String,
         audioFileName: String? = nil
     ) {
         let newEntry = PipelineHistoryItem(
             timestamp: Date(),
-            rawTranscript: rawTranscript,
-            postProcessedTranscript: postProcessedTranscript,
-            postProcessingPrompt: postProcessingPrompt,
-            contextSummary: context.contextSummary,
-            contextPrompt: context.contextPrompt,
-            contextScreenshotDataURL: context.screenshotDataURL,
-            contextScreenshotStatus: context.screenshotError
-                ?? "available (\(context.screenshotMimeType ?? "image"))",
+            rawTranscript: transcript,
+            postProcessedTranscript: transcript,
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextPrompt: nil,
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "",
             postProcessingStatus: processingStatus,
             debugStatus: debugStatusMessage,
-            customVocabulary: customVocabulary,
+            customVocabulary: "",
             audioFileName: audioFileName
         )
+
         do {
             let removedAudioFileNames = try pipelineHistoryStore.append(newEntry, maxCount: maxPipelineHistoryCount)
             for audioFileName in removedAudioFileNames {
@@ -787,148 +620,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         } catch {
             errorMessage = "Unable to save run history entry: \(error.localizedDescription)"
         }
-    }
-
-    private func startContextCapture() {
-        contextCaptureTask?.cancel()
-        capturedContext = nil
-        lastContextSummary = "Collecting app context..."
-        lastPostProcessingStatus = ""
-        lastContextScreenshotDataURL = nil
-        lastContextScreenshotStatus = "Collecting screenshot..."
-
-        contextCaptureTask = Task { [weak self] in
-            guard let self else { return nil }
-            let context = await self.contextService.collectContext()
-            await MainActor.run {
-                self.capturedContext = context
-                self.lastContextSummary = context.contextSummary
-                self.lastContextScreenshotDataURL = context.screenshotDataURL
-                self.lastContextScreenshotStatus = context.screenshotError
-                    ?? "available (\(context.screenshotMimeType ?? "image"))"
-                self.lastPostProcessingStatus = "App context captured"
-                self.handleScreenshotCaptureIssue(context.screenshotError)
-            }
-            return context
-        }
-    }
-
-    private func fallbackContextAtStop() -> AppContext {
-        let frontmostApp = NSWorkspace.shared.frontmostApplication
-        let windowTitle = focusedWindowTitle(for: frontmostApp)
-        return AppContext(
-            appName: frontmostApp?.localizedName,
-            bundleIdentifier: frontmostApp?.bundleIdentifier,
-            windowTitle: windowTitle,
-            selectedText: nil,
-            currentActivity: "Could not refresh app context at stop time; using text-only post-processing.",
-            contextPrompt: nil,
-            screenshotDataURL: nil,
-            screenshotMimeType: nil,
-            screenshotError: "No app context captured before stop"
-        )
-    }
-
-    private func focusedWindowTitle(for app: NSRunningApplication?) -> String? {
-        guard let app else { return nil }
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        return focusedWindowTitle(from: appElement)
-    }
-
-    private func focusedWindowTitle(from appElement: AXUIElement) -> String? {
-        guard let focusedWindow = accessibilityElement(from: appElement, attribute: kAXFocusedWindowAttribute as CFString) else {
-            return nil
-        }
-
-        guard let windowTitle = accessibilityString(from: focusedWindow, attribute: kAXTitleAttribute as CFString) else {
-            return nil
-        }
-
-        return trimmedText(windowTitle)
-    }
-
-    private func accessibilityElement(from element: AXUIElement, attribute: CFString) -> AXUIElement? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute, &value)
-        guard result == .success,
-              let rawValue = value,
-              CFGetTypeID(rawValue) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return unsafeBitCast(rawValue, to: AXUIElement.self)
-    }
-
-    private func accessibilityString(from element: AXUIElement, attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute, &value)
-        guard result == .success, let stringValue = value as? String else { return nil }
-        return stringValue
-    }
-
-    private func trimmedText(_ value: String) -> String? {
-        let trimmed = value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\n", with: " ")
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func handleScreenshotCaptureIssue(_ message: String?) {
-        guard let message, !message.isEmpty else {
-            hasShownScreenshotPermissionAlert = false
-            return
-        }
-
-        os_log(.error, "Screenshot capture issue: %{public}@", message)
-
-        if isScreenCapturePermissionError(message) && !hasShownScreenshotPermissionAlert {
-            hasShownScreenshotPermissionAlert = true
-
-            // Permission errors are fatal — stop recording
-            _ = audioRecorder.stopRecording()
-            audioRecorder.cleanup()
-            audioLevelCancellable?.cancel()
-            audioLevelCancellable = nil
-            contextCaptureTask?.cancel()
-            contextCaptureTask = nil
-            capturedContext = nil
-            isRecording = false
-            statusText = "Screenshot Required"
-            overlayManager.dismiss()
-
-            NSSound(named: "Basso")?.play()
-            showScreenshotPermissionAlert(message: message)
-        }
-        // Non-permission errors (transient failures) — continue recording without context
-    }
-
-    private func isScreenCapturePermissionError(_ message: String) -> Bool {
-        let lowered = message.lowercased()
-        return lowered.contains("permission") || lowered.contains("screen recording")
-    }
-
-    private func showScreenshotPermissionAlert(message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Screen Recording Permission Required"
-        alert.informativeText = "\(message)\n\nFreeFlow requires Screen Recording permission to capture screenshots for context-aware transcription.\n\nGo to System Settings > Privacy & Security > Screen Recording and enable FreeFlow."
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Dismiss")
-        alert.icon = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: nil)
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            openScreenCaptureSettings()
-        }
-    }
-
-    private func showScreenshotCaptureErrorAlert(message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Screenshot Capture Failed"
-        alert.informativeText = "\(message)\n\nA screenshot is required for context-aware transcription. Recording has been stopped."
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "Dismiss")
-        alert.icon = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: nil)
-        _ = alert.runModal()
     }
 
     func toggleDebugOverlay() {
@@ -943,12 +634,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         isDebugOverlayActive = true
         overlayManager.showRecording()
 
-        // Simulate audio levels with a timer
         var phase: Double = 0.0
         debugOverlayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
+            guard let self else { return }
             phase += 0.15
-            // Generate a fake audio level that oscillates like speech
             let base = 0.3 + 0.2 * sin(phase)
             let noise = Float.random(in: -0.15...0.15)
             let level = min(max(Float(base) + noise, 0.0), 1.0)
